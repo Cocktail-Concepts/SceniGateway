@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.cloud.gateway.filter.GatewayFilter;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
@@ -32,13 +33,21 @@ public class AuthenticationFilter implements GatewayFilter {
 
         if (routerValidator.isSecured.test(request)) {
             if (this.isAuthMissing(request)) {
-                return this.onError(exchange, HttpStatus.UNAUTHORIZED);
+                return this.onError(exchange, HttpStatus.UNAUTHORIZED, "Authorization header is missing");
             }
 
             final String token = this.getAuthHeader(request).substring(7);
 
-            if (!jwtUtil.validateToken(token)) {
-                return this.onError(exchange, HttpStatus.FORBIDDEN);
+            try {
+                if (!jwtUtil.validateToken(token)) {
+                    return this.onError(exchange, HttpStatus.FORBIDDEN, "Invalid JWT token");
+                }
+            } catch (io.jsonwebtoken.ExpiredJwtException e) {
+                // Handle expired token case
+                return this.onError(exchange, HttpStatus.UNAUTHORIZED, "JWT token has expired");
+            } catch (Exception e) {
+                // Handle any other exceptions related to JWT validation
+                return this.onError(exchange, HttpStatus.FORBIDDEN, "JWT token validation failed");
             }
 
             this.updateRequest(exchange, token);
@@ -46,11 +55,15 @@ public class AuthenticationFilter implements GatewayFilter {
         return chain.filter(exchange);
     }
 
-    private Mono<Void> onError(ServerWebExchange exchange, HttpStatus httpStatus) {
+    private Mono<Void> onError(ServerWebExchange exchange, HttpStatus httpStatus, String errorMessage) {
         ServerHttpResponse response = exchange.getResponse();
         response.setStatusCode(httpStatus);
-        return response.setComplete();
+        response.getHeaders().add("Content-Type", "application/json");
+
+        DataBuffer dataBuffer = response.bufferFactory().wrap(("{\"error\": \"" + errorMessage + "\"}").getBytes());
+        return response.writeWith(Mono.just(dataBuffer));
     }
+
 
     private String getAuthHeader(ServerHttpRequest request) {
         return request.getHeaders().getOrEmpty("Authorization").getFirst();
@@ -61,9 +74,14 @@ public class AuthenticationFilter implements GatewayFilter {
     }
 
     private void updateRequest(ServerWebExchange exchange, String token) {
-        Claims claims = jwtUtil.extractAllClaims(token);
+        Claims claims = jwtUtil.extractAllClaims(token); // Extract claims from the token
+
+        String username = claims.getSubject();
+
         exchange.getRequest().mutate()
-                .header("email", String.valueOf(claims.get("email")))
+                .header("username", username)
                 .build();
     }
+
+
 }
